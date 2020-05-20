@@ -306,3 +306,102 @@ class RandomRot(object):
             label = torch.from_numpy(label)
 
         return {'I1': I1, 'I2': I2, 'label': label}
+
+
+
+
+
+import os
+from glob import glob
+import numpy as np
+from tifffile import tifffile
+import imageio
+from PIL import Image
+
+from torch.utils.data import Dataset
+from albumentations import Compose as ACompose
+from albumentations.pytorch.transforms import ToTensor as AToTensor
+from albumentations.augmentations import transforms as atransforms
+
+
+# Added guess for band B10
+SENTINEL_BAND_STATS = {
+    'mean' : np.array([1.08158484e-01, 1.21479766e-01, 1.45487537e-01, 1.58012632e-01, 1.94156398e-01, 2.59219257e-01,
+                       2.83195732e-01, 2.96798923e-01, 3.01822935e-01, 3.08726458e-01, 2.08e-01, 2.37724304e-01, 1.72824851e-01])[None,None],
+    'std'  : np.array([2.00349529e-01, 2.06218237e-01, 1.99808794e-01, 2.05981393e-01, 2.00533060e-01, 1.82050607e-01,
+                       1.76569472e-01, 1.80955308e-01, 1.68494856e-01, 1.80597534e-01, 1.154e-01, 1.15451671e-01, 1.06993609e-01])[None,None],
+}
+
+def _sentinel_normalize(x, **kwargs):
+    return (x - SENTINEL_BAND_STATS['mean']) / SENTINEL_BAND_STATS['std']
+
+def sentinel_augmentation_valid():
+    return ACompose([
+        atransforms.Lambda(name='normalize', image=_sentinel_normalize),
+        AToTensor(),
+    ])
+
+class OneraChngDetect(Dataset):
+    def __init__(self, img_root, lab_root, normalize, bands, cities, chunk=False, patch_size=10):
+        # Did not train with B10
+        self.bands = bands
+        self.paths_dict = {}
+        for i, city in enumerate(cities):
+            img_1_path = os.path.join(img_root, city, 'imgs_1_rect')
+            img_2_path = os.path.join(img_root, city, 'imgs_2_rect')
+            lab_path = os.path.join(lab_root, city, 'cm', f'{city}-cm.tif')
+            self.paths_dict[i] = {'city': os.path.basename(city),
+                                  'img_1_path': img_1_path,
+                                  'img_2_path': img_2_path,
+                                  'lab_path': lab_path}
+
+        self.transform = sentinel_augmentation_valid() if normalize else AToTensor()
+        self.patch_size = patch_size
+        self.chunk = chunk
+
+
+    def __len__(self):
+        return len(self.paths_dict)
+
+    def tiff2numpy(self, path):
+        array = [tifffile.imread(os.path.join(path, band)) for band in self.bands]
+        array = np.stack(array, axis=0)
+        array = array.transpose(1,2,0).astype(np.float32)/10_000
+        return array
+
+    def label2numpy(self,path):
+        return np.array(tifffile.imread(path)).astype(np.float32) / 255
+
+    def _chunk(self, x, w, h, img):
+        batch = []
+        for row_idx in range(w):
+            for col_idx in range(h):
+                row_start   = self.patch_size * row_idx
+                row_end     = self.patch_size * (row_idx + 1)
+                col_start   = self.patch_size * col_idx
+                col_end     = self.patch_size * (col_idx + 1)
+                if img == True:
+                    batch.append(x[:, row_start:row_end, col_start:col_end])
+                else:
+                    z = np.zeros((2, self.patch_size, self.patch_size))
+                    k = np.where(x[row_start:row_end, col_start:col_end] == 0)
+                    z[1, k[0], k[1]] = 1
+                    z[0, :, :] = 1
+                    z[0, k[0], k[1]] = 0
+                    batch.append(z)
+        return np.stack(batch)
+
+
+    def __getitem__(self, idx):
+        img1 = self.tiff2numpy(self.paths_dict[idx]['img_1_path'])
+        img2 = self.tiff2numpy(self.paths_dict[idx]['img_2_path'])
+        lab  = self.label2numpy(self.paths_dict[idx]['lab_path'])
+        img1 = self.transform(image=img1)['image']
+        img2 = self.transform(image=img2)['image']
+        w, h = img1.shape[1] // self.patch_size, img1.shape[2] // self.patch_size
+        if self.chunk:
+            img1 = self._chunk(img1, w, h, True)
+            img2 = self._chunk(img2, w, h, True)
+            lab  = self._chunk(lab, w, h, False)
+
+        return img1, img2, lab, w, h
