@@ -7,7 +7,7 @@ from torch.autograd import Variable
 import torchvision.transforms as tr
 
 # Models
-from model import FresUNet
+from models.fresunet import FresUNet
 
 # Other
 import os
@@ -17,11 +17,7 @@ from skimage import io
 from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
 from tqdm import tqdm as tqdm
-from pandas import read_csv
-from math import floor, ceil, sqrt, exp
-from IPython import display
-import time
-from itertools import chain
+
 import time
 import warnings
 from pprint import pprint
